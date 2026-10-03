@@ -37,7 +37,7 @@ public class TracksNeoForge {
     public TracksNeoForge(IEventBus modBus, ModContainer modContainer) {
         modBus.addListener(TracksNeoForge::init);
         modBus.addListener(TracksNeoForge::registerPayloads);
-        modContainer.registerConfig(ModConfig.Type.SERVER, (IConfigSpec)TracksServerConfig.SPEC);
+        modContainer.registerConfig(ModConfig.Type.COMMON, (IConfigSpec)TracksServerConfig.SPEC);
         Tracks.init();
         Tracks.getRegistrate().registerEventListeners(modBus);
     }

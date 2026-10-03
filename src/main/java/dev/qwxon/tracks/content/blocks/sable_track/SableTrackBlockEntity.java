@@ -82,6 +82,7 @@ import com.simibubi.create.foundation.blockEntity.behaviour.scrollValue.ScrollVa
 import dev.engine_room.flywheel.lib.transform.PoseTransformStack;
 import dev.engine_room.flywheel.lib.transform.TransformStack;
 import dev.qwxon.tracks.TracksClient;
+import dev.qwxon.tracks.config.TracksServerConfig;
 import dev.qwxon.tracks.content.blocks.sable_track.SableTrackBlock;
 import dev.qwxon.tracks.content.blocks.sable_track.SableTrackPart;
 import dev.qwxon.tracks.content.blocks.sable_track.SableTrackRole;
@@ -174,11 +175,11 @@ Clearable {
     private double angle;
     private double angularVelocity = 0.0;
     private double touchingFriction = 1.0;
-    private double springMultiplier = 1.0;
+    private double springMultiplier = 0.5;
     private double dampingMultiplier = 0.1;
-    private double bumpClearanceMultiplier = 1.0;
-    private double bumpForceMultiplier = 1.0;
-    private double maxImpulseMultiplier = 1.0;
+    private double bumpClearanceMultiplier = 0.5;
+    private double bumpForceMultiplier = 0.5;
+    private double maxImpulseMultiplier = 0.5;
     private double driveMultiplier = 1.0;
     private double gripMultiplier = 1.0;
     private int lastPropagatedStrength = 16;
@@ -203,7 +204,7 @@ Clearable {
 
     public float calculateStressApplied() {
         float stress;
-        this.lastStressApplied = stress = this.effectiveRole() == SableTrackRole.DRIVE ? 16.0f : 0.0f;
+        this.lastStressApplied = stress = this.effectiveRole() == SableTrackRole.DRIVE ? 8.0f : 0.0f;
         return stress;
     }
 
@@ -224,50 +225,58 @@ Clearable {
         this.queuedForcePos.set(localPos.x, localPos.y, localPos.z);
         MassData massData = subLevel.getMassTracker();
         double normalMass = 1.0 / massData.getInverseNormalMass((Vector3dc)this.queuedForcePos, OrientedBoundingBox3d.UP);
-        double effectiveStrength = this.strength.getValue();
+        double effectiveStrength = this.strength.getValue() * TracksServerConfig.trackStrengthMultiplier();
         double normalMassScaling = Math.min(normalMass / effectiveStrength, 1.0) * 8.0;
         double strengthMul = effectiveStrength * normalMassScaling * 2.0;
-        double springStrength = effectiveStrength * normalMassScaling * 40.0 * this.springMultiplier;
-        double dampingStrength = effectiveStrength * normalMassScaling * 10.0 * this.dampingMultiplier;
+        double springStrength = effectiveStrength * normalMassScaling * 40.0 * this.springMultiplier * TracksServerConfig.trackSpringMultiplier();
+        double dampingStrength = effectiveStrength * normalMassScaling * 10.0 * this.dampingMultiplier * TracksServerConfig.trackDampingMultiplier();
         Pose3d pose = subLevel.logicalPose();
         Direction.Axis axis = facing.getAxis();
         Vec3i side = Direction.get((Direction.AxisDirection)Direction.AxisDirection.POSITIVE, (Direction.Axis)axis).getNormal();
         Vector3dc sideD = this.getRotatedAxis(side);
         side = new Vec3i(side.getZ(), 0, side.getX());
         Vector3dc forwardD = this.getRotatedAxis(side);
-        if (!this.isSuspensionActiveForPhysics(part, facing) || part.role() == SableTrackRole.DRIVE) {
+        boolean isDrive = part.role() == SableTrackRole.DRIVE;
+        if (isDrive) {
+            springStrength *= 0.4;
+            dampingStrength *= 1.2;
+        }
+        if (!this.isSuspensionActiveForPhysics(part, facing) && !isDrive) {
             TerrainCastResult visualExtensionToTerrain = this.computeMaxExtensionToTerrain(forwardD, (Pose3dc)pose, part.contactSamples());
             double visualExtension = visualExtensionToTerrain.maxExtension() - part.radius();
             this.extension = Mth.lerp((double)0.7, (double)this.extension, (double)Mth.clamp((double)visualExtension, (double)-0.45, (double)part.suspensionTravel()));
-            if (part.role() == SableTrackRole.DRIVE) {
-                this.extension = 0.0;
-            }
             return;
         }
-        double suspensionRestDistance = 0.65;
-        TerrainCastResult extensionToTerrain = this.computeMaxExtensionToTerrain(forwardD, (Pose3dc)pose, 1, 1.0);
+        double suspensionRestDistance = isDrive ? part.radius() : 0.65;
+        TerrainCastResult extensionToTerrain = this.computeMaxExtensionToTerrain(forwardD, (Pose3dc)pose, isDrive ? part.contactSamples() : 1, isDrive ? 0.35 : 1.0, isDrive);
         double maxExtension = extensionToTerrain.maxExtension();
         double springHeightCompensation = 0.0;
         double springMaxExtension = maxExtension - 0.0;
-        this.extension = Mth.lerp((double)1.0, (double)this.extension, (double)maxExtension);
-        if (springMaxExtension > 0.65 + part.radius() + 0.25) {
-            this.extension = 0.65;
+        if (!isDrive) {
+            this.extension = Mth.lerp((double)1.0, (double)this.extension, (double)maxExtension);
+        } else {
+            this.extension = 0.0;
+        }
+        if (springMaxExtension > suspensionRestDistance + part.radius() + 0.25) {
+            if (!isDrive) {
+                this.extension = 0.65;
+            }
             return;
         }
         double distance = 0.10833333333333334 + springMaxExtension;
-        double springLength = Mth.clamp((double)(distance - part.radius()), (double)0.0, (double)0.65);
+        double springLength = Mth.clamp((double)(distance - part.radius()), (double)0.0, (double)suspensionRestDistance);
         Vector3d velocity = Sable.HELPER.getVelocity(this.level, JOMLConversion.toJOML((Position)localPos));
         Vector3d localVelocity = pose.transformNormalInverse(velocity);
         double dampingForce = -localVelocity.y * dampingStrength;
-        double springError = 0.65 - springLength;
+        double springError = suspensionRestDistance - springLength;
         double bumpStopClearance = part.radius() * 0.95 * this.bumpClearanceMultiplier;
         boolean deeplyBuried = springMaxExtension < part.radius() * 0.35;
         double bumpStopError = 0.0;
         double bumpStopForce = 0.0 * springStrength * 4.0 * this.bumpForceMultiplier;
         double unclampedSpringForce = (springError * springStrength + bumpStopForce + dampingForce) * timeStep;
-        double baseMaxSpringImpulse = part.role() == SableTrackRole.DRIVE ? 45.0 : 30.0;
+        double baseMaxSpringImpulse = isDrive ? 35.0 : 30.0;
         double buriedImpulseScale = deeplyBuried ? 0.2 : 1.0;
-        double maxSpringImpulse = Math.max(baseMaxSpringImpulse, normalMass * 0.9) * this.maxImpulseMultiplier * buriedImpulseScale;
+        double maxSpringImpulse = Math.max(baseMaxSpringImpulse, normalMass * 0.9) * this.maxImpulseMultiplier * TracksServerConfig.trackStrengthMultiplier() * buriedImpulseScale;
         double springForce = Mth.clamp((double)unclampedSpringForce, (double)(-maxSpringImpulse), (double)maxSpringImpulse);
         Vec3i rayHitNormal = extensionToTerrain.normal().getNormal();
         Vec3 localForce = new Vec3(springForce * (double)rayHitNormal.getX(), springForce * (double)rayHitNormal.getY(), springForce * (double)rayHitNormal.getZ());
@@ -281,8 +290,11 @@ Clearable {
         double surfaceBraking = Math.min(this.touchingFriction, 1.0);
         double brakingFrictionStrength = (0.075 + brakeStrength * 0.3) * surfaceBraking * part.sideGripMultiplier();
         float kineticSpeed = Math.abs(this.getSharedTrackSpeed(facing)) < 0.05f ? 0.0f : this.getSharedTrackSpeed(facing);
-        this.queuedForce.fma(localVelocity.dot(forwardD) * -brakingFrictionStrength * strengthMul * timeStep + (double)kineticSpeed * (1.0 - brakeStrength) * surfaceBraking * -0.45 * part.driveMultiplier() * this.driveMultiplier * timeStep, forwardD);
-        this.queuedForce.fma(localVelocity.dot(sideD) * -0.6 * this.touchingFriction * strengthMul * part.sideGripMultiplier() * this.gripMultiplier * timeStep, sideD);
+        double globalTorque = TracksServerConfig.trackTorqueMultiplier();
+        double globalSpeed = TracksServerConfig.trackSpeedMultiplier();
+        double globalGrip = TracksServerConfig.trackGripMultiplier();
+        this.queuedForce.fma(localVelocity.dot(forwardD) * -brakingFrictionStrength * strengthMul * timeStep + (double)kineticSpeed * globalSpeed * (1.0 - brakeStrength) * surfaceBraking * -0.45 * part.driveMultiplier() * this.driveMultiplier * globalTorque * timeStep, forwardD);
+        this.queuedForce.fma(localVelocity.dot(sideD) * -0.6 * this.touchingFriction * strengthMul * part.sideGripMultiplier() * this.gripMultiplier * globalGrip * timeStep, sideD);
         if (this.queuedForce.lengthSquared() < 1.0E-10) {
             return;
         }
@@ -362,11 +374,7 @@ Clearable {
         return Mth.clamp((double)unclampedExtension, (double)-0.45, (double)part.suspensionTravel());
     }
 
-    private TerrainCastResult computeMaxExtensionToTerrain(Vector3dc forwardD, Pose3dc pose, int contactSamples) {
-        return this.computeMaxExtensionToTerrain(forwardD, pose, contactSamples, 0.35);
-    }
-
-    private TerrainCastResult computeMaxExtensionToTerrain(Vector3dc forwardD, Pose3dc pose, int contactSamples, double sampleSpacing) {
+    private TerrainCastResult computeMaxExtensionToTerrain(Vector3dc forwardD, Pose3dc pose, int contactSamples, double sampleSpacing, boolean allowWalls) {
         Direction facing = (Direction)this.getBlockState().getValue(SableTrackBlock.HORIZONTAL_FACING);
         Vec3 trackPosCenter = this.getTrackCenter(facing);
         double minExtension = 5.0;
@@ -390,13 +398,21 @@ Clearable {
                 hitSubLevel.logicalPose().transformNormal(hitNormal);
             }
             pose.transformNormalInverse(hitNormal);
-            if (hitNormal.dot(0.0, 1.0, 0.0) < 0.5) continue;
+            if (!allowWalls && hitNormal.dot(0.0, 1.0, 0.0) < 0.5) continue;
             minExtension = Math.min(minExtension, dist);
             minNormal = clipResult.getDirection();
             minHitSubLevel = hitSubLevel;
             minInteractingBlock = clipResult.getBlockPos();
         }
         return new TerrainCastResult(minExtension, minNormal, minHitSubLevel, minInteractingBlock);
+    }
+
+    private TerrainCastResult computeMaxExtensionToTerrain(Vector3dc forwardD, Pose3dc pose, int contactSamples) {
+        return this.computeMaxExtensionToTerrain(forwardD, pose, contactSamples, 0.35, false);
+    }
+
+    private TerrainCastResult computeMaxExtensionToTerrain(Vector3dc forwardD, Pose3dc pose, int contactSamples, double sampleSpacing) {
+        return this.computeMaxExtensionToTerrain(forwardD, pose, contactSamples, sampleSpacing, false);
     }
 
     private void applyBatchedForces() {
@@ -416,13 +432,12 @@ Clearable {
         double physicsYOffset = -0.5;
         double currentHeightOffset = this.heightOffset;
         if (this.effectiveRole() == SableTrackRole.DRIVE) {
-            currentHeightOffset = 0;
             Direction trackSide = facing.getClockWise();
             boolean frontEnd = !this.hasTrackNeighbor(trackSide) && this.hasTrackNeighbor(trackSide.getOpposite());
             if (frontEnd) {
-                physicsYOffset = -1.0;
+                physicsYOffset = 0.35;
             } else {
-                physicsYOffset = -0.1;
+                physicsYOffset = 0.25;
             }
         }
         return this.getBlockPos().relative(facing).getCenter().add(Vec3.atLowerCornerOf((Vec3i)facing.getClockWise().getNormal()).scale(this.lateralOffset)).add(Vec3.atLowerCornerOf((Vec3i)facing.getNormal()).scale(this.longitudinalOffset)).add(0.0, currentHeightOffset + physicsYOffset, 0.0);
@@ -452,7 +467,7 @@ Clearable {
             this.setChanged();
             if (this.level != null && !this.level.isClientSide) {
                 this.sendData();
-                this.applyOffsetToConnectedTrack("lateral", this.lateralOffset);
+                this.applyOffsetToConnectedTrack("lateral", this.lateralOffset, false);
             }
         }
         return this.lateralOffset;
@@ -465,23 +480,20 @@ Clearable {
             this.setChanged();
             if (this.level != null && !this.level.isClientSide) {
                 this.sendData();
-                this.applyOffsetToConnectedTrack("longitudinal", this.longitudinalOffset);
+                this.applyOffsetToConnectedTrack("longitudinal", this.longitudinalOffset, false);
             }
         }
         return this.longitudinalOffset;
     }
 
-    public double adjustHeightOffset(int direction) {
-        if (this.effectiveRole() == SableTrackRole.DRIVE) {
-            return this.heightOffset;
-        }
+    public double adjustHeightOffset(int direction, boolean sideInteraction) {
         double previous = this.heightOffset;
         this.heightOffset = Mth.clamp((double)((double)Math.round((this.heightOffset + (double)direction * 0.125) / 0.125) * 0.125), (double)-0.75, (double)0.75);
         if (Math.abs(previous - this.heightOffset) > 1.0E-6) {
             this.setChanged();
             if (this.level != null && !this.level.isClientSide) {
                 this.sendData();
-                this.applyOffsetToConnectedTrack("height", this.heightOffset);
+                this.applyOffsetToConnectedTrack("height", this.heightOffset, sideInteraction);
             }
         }
         return this.heightOffset;
@@ -749,13 +761,16 @@ Clearable {
         }
         this.lastPropagatedStrength = 16;
         this.protectedStrengthValue = 16;
-        this.springMultiplier = 1.0;
-        this.dampingMultiplier = 0.1;
+        this.springMultiplier = 0.5;
+        this.dampingMultiplier = 1.0;
         this.bumpClearanceMultiplier = 1.0;
         this.bumpForceMultiplier = 1.0;
         this.maxImpulseMultiplier = 1.0;
         this.driveMultiplier = 1.0;
         this.gripMultiplier = 1.0;
+        this.lateralOffset = 0.0;
+        this.longitudinalOffset = 0.0;
+        this.heightOffset = 0.0;
         this.setChanged();
         if (this.level != null && !this.level.isClientSide) {
             this.sendData();
@@ -913,17 +928,17 @@ Clearable {
         }
     }
 
-    private void applyOffsetToConnectedTrack(String key, double value) {
+    private void applyOffsetToConnectedTrack(String key, double value, boolean sideInteraction) {
         if (this.level == null || this.level.isClientSide) {
             return;
         }
         Direction facing = (Direction)this.getBlockState().getValue(SableTrackBlock.HORIZONTAL_FACING);
         Direction along = facing.getClockWise();
-        this.copyOffsetAlong(along, facing, key, value);
-        this.copyOffsetAlong(along.getOpposite(), facing, key, value);
+        this.copyOffsetAlong(along, facing, key, value, sideInteraction);
+        this.copyOffsetAlong(along.getOpposite(), facing, key, value, sideInteraction);
     }
 
-    private void copyOffsetAlong(Direction direction, Direction facing, String key, double value) {
+    private void copyOffsetAlong(Direction direction, Direction facing, String key, double value, boolean sideInteraction) {
         for (int step = 1; step <= 16; ++step) {
             SableTrackBlockEntity neighbor;
             BlockPos targetPos = this.getBlockPos().relative(direction, step);
@@ -931,7 +946,8 @@ Clearable {
             if (!(blockEntity instanceof SableTrackBlockEntity) || (neighbor = (SableTrackBlockEntity)blockEntity).getBlockState().getValue(SableTrackBlock.HORIZONTAL_FACING) != facing) {
                 return;
             }
-            if (neighbor.effectiveRole() == SableTrackRole.SUSPENSION) {
+            SableTrackRole role = neighbor.effectiveRole();
+            if (role == SableTrackRole.SUSPENSION || (!sideInteraction && role == SableTrackRole.DRIVE)) {
                 neighbor.setOffset(key, value);
             }
         }
